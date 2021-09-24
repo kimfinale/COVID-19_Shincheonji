@@ -1,10 +1,19 @@
 ---
 title: "Rapid transmission of coronavirus disease 2019 within a religious sect in South Korea: a mathematical modeling study"
-author: "Jong-Hoon Kim"
+knit: (function(input_file, encoding) {
+  out_dir <- 'docs';
+  rmarkdown::render(input_file,
+ encoding=encoding,
+ output_file=file.path(dirname(input_file), out_dir, 'index.html'))})
+author: "Jong-Hoon Kim, Hyojung Lee, Yong Sul Won, Woo-Sik Son, and Justin Im"
 date: "9/24/2021"
 output: html_document
 ---
 
+
+```{r setup, include=FALSE} 
+knitr::opts_chunk$set(warning = FALSE, message = FALSE) 
+```
 
 ### Load libraries
 ```{r}
@@ -29,7 +38,6 @@ dpc <- as.Date("2020-02-22") # date policy change
 dg <- c(as.Date("2020-02-15"), as.Date("2020-03-01"), 
         as.Date("2020-03-15"), as.Date("2020-04-01")) # regular dates for guidance
 
-
 p <- ggplot(d)  +
   geom_bar(aes(date, Total), stat = "identity", fill = NA, color = "black") +
   geom_bar(aes(date, Shincheonji), stat = "identity", fill = "grey50") +
@@ -45,25 +53,24 @@ p <- ggplot(d)  +
            ymin = 7700, ymax = 7800, fill = "grey50") + 
   annotate("text", x = max(d$date)-3, y=c(7950,7750), 
             label=c("Total", "Shincheonji"), hjust=0, size=2.5 ) +
-  # theme_bw(base_size = 12) +
   theme(axis.text.x = element_text(angle = 45, hjust=1),
         panel.grid.major = element_line("grey90"))
 
 p  
-# uncomment the following to save the figure
-# ggsave("plots/daegu_epi_curve.png", p, width=3.4*2, height=2.7*2, units="in")
+```
+
+```{r, eval = FALSE, echo = FALSE}
+ggsave("plots/daegu_epi_curve.png", p, width=3.4*2, height=2.7*2, units="in")
 ```
 
 ### Table 2: Doubling time
 ```{r}
-## load data
-# df_temp = read.xlsx("data/covid_daegu_0726.xlsx", sheet = "Sheet1", 
-#                     detectDates = TRUE, colNames = TRUE, startRow = 1)
+ # calculation are done based on imputed data
 df_temp <- read_csv("outputs/DAT_imputed.csv")
 df_temp %<>% 
   mutate(date = as.Date(date, "%m/%d/%Y")) %>% 
   select(c("date", "cumul_total", "cumul_shincheonji", "cumul_low")) %>% 
-  filter(date < as.Date("2020-03-09"))
+  filter(date < as.Date("2020-03-09")) # only during the initial period 
 
 names(df_temp) <- c("date", "Cum_Daegu",
                     "Cum_Shincheonji", "Cum_Non_Shincheonji")
@@ -90,7 +97,7 @@ df.shin = df_all %>%
   dplyr::select(date, time, Cum_Shincheonji) %>%
   rename(ct = Cum_Shincheonji)
 df.nonshin = df_all %>%
-  dplyr::select(date,time, Cum_Non_Shincheonji) %>%
+  dplyr::select(date, time, Cum_Non_Shincheonji) %>%
   rename(ct = Cum_Non_Shincheonji)
 df.daegu = df_all %>%
   dplyr::select(date, time, Cum_Daegu)%>%
@@ -123,8 +130,7 @@ outall = rbind(out1, out7)
 # fwrite(outall, "outputs/doubling_time.csv")
 ```
 
-### Fit Approximate Bayesian Computation Sequential Monte Carlo SEPIAR model
-
+### Fit the stochastic SEPIAR model using Approximate Bayesian Computation Sequential Monte Carlo 
 ```{r eval = FALSE}
 library(tmvtnorm)
 library(truncnorm)
@@ -139,7 +145,7 @@ params_est <- readin_params("inputs/par.csv",
 params <- params_est[["params"]]
 
 # Some parameter values were updated according to recent evidence and 
-# were  set manually
+# were set manually
 params$frac_asymp <- 0.306
 params_est$savepar[params_est$savepar$par == "frac_asymp", 2] <-
   params$frac_asymp
@@ -316,7 +322,7 @@ d_high <- dplyr::filter(sim_daily, pop == "High risk")
 mycolor <- "steelblue"
 xx <- as.Date("2020-02-07")
 yy <- 500
-plt <- ggplot(d_low) +
+plt1 <- ggplot(d_low) +
   geom_ribbon(aes(x = date, ymin = q025, ymax = q975), fill = mycolor, alpha = 0.2) +
   geom_ribbon(aes(x = date, ymin = q250, ymax = q750), fill = mycolor, alpha = 0.4) +
   geom_line(aes(date, q500), color = mycolor, size = 1.2) +
@@ -338,13 +344,12 @@ plt <- ggplot(d_low) +
   annotate( "text", x = xx + 3, y = 475, size = 4, 
             label = "Model", hjust = 0, vjust = 0.5)
 
-# ggsave(paste0("plots/low_risk_daily_", tstamp, ".png"),
-#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+plt1
 
 mycolor <- "darkred"
 xx <- as.Date("2020-02-07")
 yy <- 560
-plt <- ggplot(d_high) +
+plt2 <- ggplot(d_high) +
   geom_ribbon(aes(x = date, ymin = q025, ymax = q975), fill = mycolor, alpha = 0.2) +
   geom_ribbon(aes(x = date, ymin = q250, ymax = q750), fill = mycolor, alpha = 0.4) +
   geom_line(aes(date, q500), color = "darkred", size = 1.2) +
@@ -366,9 +371,17 @@ plt <- ggplot(d_high) +
   annotate("text", x = xx + 3, y = yy - 25, size = 4, 
            label = "Model", hjust = 0, vjust = 0.5)
 
-# ggsave(paste0("plots/high_risk_daily_", tstamp, ".png"), plt,
-#        width = 3.4*2, height = 2.7*2, units = "in")
+plt2
 ```
+
+```{r echo = FALSE, eval = FALSE}
+ggsave(paste0("plots/low_risk_daily_", tstamp, ".png"),
+       plt1, width = 3.4*2, height = 2.7*2, units = "in")
+
+ggsave(paste0("plots/high_risk_daily_", tstamp, ".png"), plt2,
+        width = 3.4*2, height = 2.7*2, units = "in")
+```
+
 
 ### Figures 3(c) and 3(d): Cumulative incidence (model vs. data)
 ```{r}
@@ -390,7 +403,7 @@ mylabel_model <- "Model"
 sim_res <- high
 mycolor <- "darkred"
 
-plt <- ggplot(DAT) +
+plt1 <- ggplot(DAT) +
   geom_bar(aes(date, cumul_shincheonji), stat = "identity", fill = "grey50") +
   geom_ribbon(data = sim_res, aes(x = date, ymin = q250, ymax = q750), 
                fill = mycolor, alpha = 0.4, inherit.aes = F) +
@@ -412,16 +425,15 @@ plt <- ggplot(DAT) +
            ymax = yy - 400, fill = "grey50", color = "black") +
   annotate("text", x = xd + 3, y = yy - 500, size = 4, 
            label = mylabel_data, hjust = 0, vjust = 0.5) 
-# 
-# ggsave(paste0("plots/high_cumul_data_model_", tstamp, ".png"),
-#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+plt1 
+
 
 mylabel_data <- "Data"
 mylabel_model <- "Model"
 sim_res <- low
 mycolor <- "steelblue"
 
-plt <- ggplot(DAT) +
+plt2 <- ggplot(DAT) +
   geom_bar(aes(date, cumul_low), stat = "identity", fill = "grey50") +
   geom_ribbon(data = sim_res, aes(x = date, ymin = q250, ymax = q750), 
                fill = mycolor, alpha = 0.4, inherit.aes = F) +
@@ -443,11 +455,18 @@ plt <- ggplot(DAT) +
            ymax = yy - 400, fill = "grey50", color = "black") +
   annotate("text", x = xd + 3, y = yy - 500, size = 4, 
            label = mylabel_data, hjust = 0, vjust = 0.5) 
-# 
-# ggsave(paste0("plots/low_cumul_data_model_", tstamp, ".png"),
-#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+plt2
 ```
 
+
+```{r echo = FALSE, eval = FALSE}
+ggsave(paste0("plots/high_cumul_data_model_", tstamp, ".png"),
+      plt1, width = 3.4*2, height = 2.7*2, units = "in")
+
+ggsave(paste0("plots/low_cumul_data_model_", tstamp, ".png"),
+      plt2, width = 3.4*2, height = 2.7*2, units = "in")
+
+```
 
 ### Figure 3(e): Posterior distribution
 ```{r}
@@ -502,11 +521,15 @@ plt <- ggplot(d) +
               expression(italic(R)[paste(0, ",", 1)]))) + 
   scale_y_continuous(name = "Value") +
   coord_flip() 
-  
-# ggsave(paste0("plots/params_", tstamp, ".png"), plt,
-#       width = 3.4, height = 2.7, units = "in")
+
+plt  
+
 ```
 
+```{r echo=FALSE, eval=FALSE}
+ggsave(paste0("plots/params_", tstamp, ".png"), plt,
+     width = 3.4, height = 2.7, units = "in")
+```
 
 ## Supplementary Material
 
@@ -568,11 +591,9 @@ dd %<>%
          daily_low_new = ifelse(daily_low < 0, 
                                 daily_shin - daily_tot, daily_low))
 
-
 # We exchange daily_tot_new and daily_low_new when 
 # daily_shin_new < 0. Then, we set daily_shin_new = daily_tot_new - 
 # daily_low_new
-
 dd %<>%
   mutate(daily_tot_new = ifelse(daily_shin_new < 0,
                                 daily_low_new, daily_tot_new),
@@ -590,20 +611,25 @@ names(ddd) <- c("date", "cumul_total", "cumul_shincheonji", "cumul_low",
 ddd$cumul_total <- cumsum(ddd$daily_total)
 ddd$cumul_shincheonji <- cumsum(ddd$daily_shincheonji)
 ddd$cumul_low <- cumsum(ddd$daily_low)
-
-# write_csv(ddd, "outputs/DAT_Imputed.csv")
 ```
+
+```{r echo=FALSE, eval=FALSE}
+write_csv(ddd, "outputs/DAT_Imputed.csv")
+```
+
 
 ### Figure S1: missing data imputation
 ```{r}
-d1 <- read_xlsx("data/covid_daegu.xlsx", "incidence")
-d <- d1[, 1:5]
-d$date <- as.Date(d$date)
+# # Uncomment if you want to plot the version before imputation
+# d1 <- read_xlsx("data/covid_daegu.xlsx", "incidence")
+# d <- d1[, 1:5]
+# d$date <- as.Date(d$date)
+
 # Uncomment if you want to plot the imputed version
-# d1 <- read_csv("outputs/DAT_Imputed.csv")
-# d <- d1[, c("date", "daily_total", "daily_shincheonji", 
-#             "cumul_total", "cumul_shincheonji")]
-# d$date <- as.Date(d$date, format="%m/%d/%Y")
+d1 <- read_csv("outputs/DAT_Imputed.csv")
+d <- d1[, c("date", "daily_total", "daily_shincheonji",
+            "cumul_total", "cumul_shincheonji")]
+d$date <- as.Date(d$date, format="%m/%d/%Y")
 
 names(d) <- c("date", "daily_total", "daily_shincheonji", "Total", "Shincheonji")
 
@@ -621,11 +647,12 @@ plt <- ggplot(d) +
                 labels=seq( ymd("2020-02-15"), ymd("2020-03-31"), length.out=10), 
                 breaks=seq( ymd("2020-02-15"), ymd("2020-03-31"), length.out=10) )
 plt  
-
-# ggsave("plots/before_impute.png", p, width=3.4, height=2.7, units="in")
-# ggsave("plots/after_impute.png", p, width=3.4, height=2.7, units="in")
 ```
 
+```{r echo=FALSE, eval=FALSE}
+# ggsave("plots/before_impute.png", p, width=3.4, height=2.7, units="in")
+ggsave("plots/after_impute.png", p, width=3.4, height=2.7, units="in")
+```
 
 ### Figure S2: posterior distribution
 ```{r}
@@ -667,13 +694,15 @@ plt <- mcmc_pairs(df, pars = nms,
                        expression(italic(R)[paste(0, ",", 2)]),  
             off_diag_args = list(size = 2, alpha = 1/3)))
 plt
+```
 
-# ggsave(paste0("plots/pairs_", tstamp, ".png"), plt,
-#        width = 3.4*4, height = 2.7*4, units = "in")
+```{r eval=FALSE, echo=FALSE}
+ggsave(paste0("plots/pairs_", tstamp, ".png"), plt,
+      width = 3.4*4, height = 2.7*4, units = "in")
 ```
 
 
-### Table S2: Doubling time, epidemic growth rate, and $R_0$ for the SEIR model
+### Table S2: Estimating $R_0$ for the SEIR model based on the doubling time and epidemic growth rate 
 
 $$T_d = \frac{\ln(2)}{r}$$
 
@@ -713,7 +742,10 @@ for (i in 1:nrow(d)) {
   }
 }
 round(R, digits = 1)
-# fwrite(R, "outputs/R0_from_doubling_time.csv")  
+```
+
+```{r eval=FALSE, echo=FALSE}
+fwrite(R, "outputs/R0_from_doubling_time.csv")  
 ```
 
 ### Figure S3: sensitivity analysis
@@ -792,7 +824,7 @@ ylab_list[[5]] <- expression(italic(d))
 ylab_list[[6]] <- expression(italic(R)^final)
 
 fn <- c("R1", "R2", "I0", "c12", "d", "Rf")
-
+plts <- list()
 for (i in 1:6) {
   sim <- sim_list[[i]]
   ylab <- ylab_list[[i]]
@@ -800,15 +832,15 @@ for (i in 1:6) {
   dd <- as.data.frame(t(sim))
   d <- cbind(data.frame(par = c(1, 2, 3), dd))
 
-  plt <- ggplot(d) +
+  plts[[i]] <- ggplot(d) +
     geom_segment(aes(y = V1, yend = V5, x = par, xend = par), size = 1) +
     geom_segment(aes(y = V2, yend = V4, x = par, xend = par), size = 1.6) +
     geom_point(aes(par , V3), size = 2.2, color = "red") +
     labs(y = ylab, x = xlab)
   
-  plt
   # tstamp <- "0727T23"
   # ggsave(paste0("plots/", fname, "_alpha_", tstamp, ".png"), plt,
   #        width = 3.4, height = 2.7, units = "in")
 }
+plts
 ```
