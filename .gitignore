@@ -1,3 +1,7 @@
+# Personal to save plots and documents 
+plots/
+manuscript/
+
 # History files
 .Rhistory
 .Rapp.history

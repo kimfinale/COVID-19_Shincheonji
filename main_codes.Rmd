@@ -1,0 +1,814 @@
+---
+title: "Rapid transmission of coronavirus disease 2019 within a religious sect in South Korea: a mathematical modeling study"
+author: "Jong-Hoon Kim"
+date: "9/24/2021"
+output: html_document
+---
+
+
+### Load libraries
+```{r}
+libraries = c("readxl", "tidyverse", "reshape2", "openxlsx",
+              "matrixStats", "tidyquant", "magrittr", "data.table")
+for(x in libraries) {library(x, character.only = TRUE, warn.conflicts = FALSE)}
+theme_set(theme_bw())
+```
+
+
+### Figure 1: Epidemic curve
+Annotations were done separately using Microsoft Powerpoint
+```{r}
+d1 <- read_xlsx("data/covid_daegu.xlsx", "incidence")
+d <- d1[, 1:5]
+d$date <- as.Date(d$date)
+names(d) <- c("date", "daily_total", "daily_shincheonji", "Total", "Shincheonji")
+
+dfs <- as.Date("2020-02-07") # date first symptom
+dfc <- as.Date("2020-02-18") # date first confirm
+dpc <- as.Date("2020-02-22") # date policy change
+dg <- c(as.Date("2020-02-15"), as.Date("2020-03-01"), 
+        as.Date("2020-03-15"), as.Date("2020-04-01")) # regular dates for guidance
+
+
+p <- ggplot(d)  +
+  geom_bar(aes(date, Total), stat = "identity", fill = NA, color = "black") +
+  geom_bar(aes(date, Shincheonji), stat = "identity", fill = "grey50") +
+  scale_y_continuous(limits = c(0, 8000)) +
+  scale_x_date(limits = c(as.Date("2020-02-05"), max(d$date) + 1), 
+               labels = c(dfs, dfc, dpc, dg), 
+               breaks = c(dfs, dfc, dpc, dg), 
+               date_labels = "%b %d") +
+  labs(y = "Cumulative number of cases", x = "Date") +
+  annotate("rect", xmin = max(d$date) - 6, xmax=max(d$date)-5, 
+           ymin = 7900, ymax = 8000, fill = NA, color = "black") +
+  annotate("rect", xmin = max(d$date)-6, xmax=max(d$date)-5, 
+           ymin = 7700, ymax = 7800, fill = "grey50") + 
+  annotate("text", x = max(d$date)-3, y=c(7950,7750), 
+            label=c("Total", "Shincheonji"), hjust=0, size=2.5 ) +
+  # theme_bw(base_size = 12) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1),
+        panel.grid.major = element_line("grey90"))
+
+p  
+# uncomment the following to save the figure
+# ggsave("plots/daegu_epi_curve.png", p, width=3.4*2, height=2.7*2, units="in")
+```
+
+### Table 2: Doubling time
+```{r}
+## load data
+# df_temp = read.xlsx("data/covid_daegu_0726.xlsx", sheet = "Sheet1", 
+#                     detectDates = TRUE, colNames = TRUE, startRow = 1)
+df_temp <- read_csv("outputs/DAT_imputed.csv")
+df_temp %<>% 
+  mutate(date = as.Date(date, "%m/%d/%Y")) %>% 
+  select(c("date", "cumul_total", "cumul_shincheonji", "cumul_low")) %>% 
+  filter(date < as.Date("2020-03-09"))
+
+names(df_temp) <- c("date", "Cum_Daegu",
+                    "Cum_Shincheonji", "Cum_Non_Shincheonji")
+
+df_all = df_temp %>% mutate(time = 1:n())
+
+# function to calculate the doubling time
+# T indicates the time interval over which doubling time is calculated
+# ie, daily doubling time if T = 1 and weekly rolling doubling time if T = 7
+doubling_ft = function(T, df){
+  nn = nrow(df) - T
+  df_doubling = df
+  df_doubling$doubling = 0
+  for (ii in 1: nn){
+    end = ii + T
+    start = ii
+    df_doubling$doubling[ii + T] = 
+      (end - start)*log(2)/log(df$ct[end]/df$ct[start])
+  }
+  return(df_doubling)
+}
+
+df.shin = df_all %>%
+  dplyr::select(date, time, Cum_Shincheonji) %>%
+  rename(ct = Cum_Shincheonji)
+df.nonshin = df_all %>%
+  dplyr::select(date,time, Cum_Non_Shincheonji) %>%
+  rename(ct = Cum_Non_Shincheonji)
+df.daegu = df_all %>%
+  dplyr::select(date, time, Cum_Daegu)%>%
+  rename(ct = Cum_Daegu)
+
+names = c("Shincheonji", "Non-Shincheonji", "Total")
+df_list = list(df.shin, df.nonshin, df.daegu)
+
+out1day = list()
+out7day = list()
+
+out1day[[1]] = doubling_ft(T = 1, df=df_list[[1]])%>%
+  mutate(var = names[1], days = 1)
+out7day[[1]] = doubling_ft(T = 7, df=df_list[[1]]) %>%
+  mutate(var=names[1],days=7)
+
+out1day[[2]] = doubling_ft(T = 1, df=df_list[[2]])%>%
+  mutate(var = names[2], days = 1)
+out7day[[2]] = doubling_ft(T = 7, df=df_list[[2]])%>%
+  mutate(var = names[2], days = 7)
+
+out1day[[3]] = doubling_ft(T = 1, df = df_list[[3]])%>%
+  mutate(var=names[3],days = 1)
+out7day[[3]] = doubling_ft(T = 7, df = df_list[[3]])%>%
+  mutate(var = names[3], days = 7)
+
+out1 = do.call("rbind", out1day)
+out7 = do.call("rbind", out7day)
+outall = rbind(out1, out7)
+# fwrite(outall, "outputs/doubling_time.csv")
+```
+
+### Fit Approximate Bayesian Computation Sequential Monte Carlo SEPIAR model
+
+```{r eval = FALSE}
+library(tmvtnorm)
+library(truncnorm)
+library(Rcpp) 
+sourceCpp("cpp/seir_2grp_tauleap.cpp") ## two group stochastic model in C++
+source("R/read_inputs.R")
+source("R/load_data.R")  
+source("R/model_functions.R")
+
+params_est <- readin_params("inputs/par.csv", 
+                            cont_mat = "inputs/cont_mat_2grp.csv")
+params <- params_est[["params"]]
+
+# Some parameter values were updated according to recent evidence and 
+# were  set manually
+params$frac_asymp <- 0.306
+params_est$savepar[params_est$savepar$par == "frac_asymp", 2] <-
+  params$frac_asymp
+
+params$rel_rate_isol_asymp <- 0.5
+params_est$savepar[params_est$savepar$par == "rel_rate_isol_asymp", 2] <-
+  params$rel_rate_isol_asymp
+
+params$max_rate_isol <-	0.5
+params_est$savepar[params_est$savepar$par == "max_rate_isol", 2] <-
+  params$max_rate_isol
+
+set.seed(7) # to make stochastic runs reproducible
+
+# tolerance values for low (non-Shincheonji) and high (Shincheonji)
+# initial values (i.e., maximum difference)
+max_diff_high <- sqrt(sum((2*DAT$daily_shincheonji)^2, na.rm = T))
+max_diff_low <- sqrt(sum((2*DAT$daily_low)^2, na.rm = T))
+# tolerance levels
+epsilon_inc_high <- seq(max_diff_high, round(0.06 * max_diff_high), length.out = 20)
+epsilon_inc_low <- seq(max_diff_low, round(0.06 * max_diff_low), length.out = 20)
+# minimum tolerance levels were chosen by trial and error
+epsilon_inc_high[19:20] <- c(290, 250)
+epsilon_inc_low[19:20] <- c(190, 180)
+
+G <- length(epsilon_inc_high)# Generations of SMC
+N <- 200 # Number of particles
+n <- 1 # Number of simulations for each parameter set
+lb <- c(1, 1, 1e-6, 1e-3, 1, 1e-3) # lower bounds for the parameter values
+ub <- c(20, 20, 1, 10, 30, 20) # upper bounds for the parameter values
+np <- length(lb) # number of parameters
+res_old <- matrix(ncol = np, nrow = N) # store SMC samples for the parameters
+res_new <- matrix(ncol = np, nrow = N)
+# Empty vectors to store weights
+w_old <- matrix(ncol = 1, nrow = N)
+w_new <- matrix(ncol = 1, nrow = N)
+
+tbegin <- Sys.time()
+tstamp <- format(tbegin, "%m%dT%H%M%S") # time stamp for the result
+# simulation log
+simlog <- file(paste0("outputs/simlog_", tstamp, ".log"), open = "w") 
+npart_check <- 200 # check progress every npart_check particles
+
+for (g in 1:G){
+  i <- 1
+  while (i <= N) {
+    if (g == 1) { # sample from the prior distributions for the first generation
+      par <- runif(np, min = lb, max = ub) # 6 parameters
+      R01 <- par[1]
+      inf <- ceiling(par[2]) # number of infected as an integer
+      I01 <- rbinom(1, inf, prob = 1 - params$frac_asymp)
+      A01 <- inf - I01
+      frac_mix <- par[3]
+      final_R01 <- par[4]
+      final_R02 <- par[4]
+      dur_intervention <- par[5]
+      R02 <- par[6]
+    } 
+    else {
+      p <- sample(seq(1, N), 1, prob = w_old)# select particles from previous generation
+      par <- rK(res_old[p, ], sigma) # perturb through a kernel (truncated normal)
+      R01 <- par[1]
+      inf <- ceiling(par[2])
+      I01 <- rbinom(1, inf, prob = 1 - params$frac_asymp)
+      A01 <- inf - I01
+      frac_mix <- par[3]
+      final_R01 <- par[4]
+      final_R02 <- par[4]
+      dur_intervention <- par[5]
+      R02 <- par[6]
+    }
+    if (prior_non_zero(c(R01, inf, frac_mix, final_R01, dur_intervention, R02)) &
+        final_R01 < R01 & final_R02 < R02) {
+      m <- 0 # Set number of accepted simulations to zero
+      distance <- matrix(ncol = 2, nrow = n) 
+      for (j in 1:n) {
+        params$R01 <- R01
+        params$init$I1 <- I01
+        params$init$A1 <- A01
+        params$init$S1 <- params$pop_high - I01 - A01
+        frac_mix21 <- frac_mix * POP_SHINCHEONJI_DAEGU / POP_DAEGU
+        params$cm <- c(1 - frac_mix, frac_mix, frac_mix21, 1 - frac_mix21)
+        params$final_R01 <- final_R01
+        params$time_intervention_stop <- 
+          params$time_intervention_start + dur_intervention
+        params$R02 <- R02
+        params$final_R02 <- final_R02
+            
+        Dstar <- run_model_tauleap(params)    
+        # distance between the data and the model    
+        calc_dist <- calc_distance(Dstar[[1]], Dstar[[2]])
+        distance[j, ] <- calc_dist    
+        # count the number of simulations that led to the differences that are
+        # smaller than the tolerance level of the generation g
+        if ((calc_dist[1] <= epsilon_inc_high[g]) &
+            (calc_dist[2] <= epsilon_inc_low[g])){
+            m <- m + 1
+        }
+      } 
+      if (m > 0){
+        res_new[i,] <- 
+          c(R01, inf, frac_mix, final_R01, dur_intervention, R02) # store results
+        w1 <- prod(sapply(1:length(ub), function(x) 
+          dunif(res_new[i, x], min = lb[x], max = ub[x]))) # calculate weights
+        if (g == 1) { w2 <- 1 } 
+        else {
+          w2 <- sum(sapply(1:N, function(x) 
+          w_old[x] * dtmvnorm(res_new[i,], res_old[x,], sigma, lb, ub)))
+        }
+        w_new[i] <- (m / n) * w1 / w2
+        # check progress every  npart_check particles
+        if (i %% npart_check == 0) {
+          tnow <-  Sys.time()
+          telapsed <- round(difftime(tnow, tbegin, units = "mins")[[1]], digits = 1)
+          log <- paste0("Gen = ", g, ", Particle = ", i, ", Distance = ", 
+                        formatC(calc_dist[1], digits = 1, format = "f"), ", ",
+                        formatC(calc_dist[2], digits = 1, format = "f"), 
+                        ", Time = ", format(tnow, "%H:%M:%S"), 
+                        ", Minutes elapsed = ", telapsed)
+          print(log)
+          cat(paste0(log,"\n"), file = simlog, append = TRUE) # creates file and writes to it
+        }
+        i <- i + 1
+      }
+    } 
+  }
+  sigma <- cov(res_new)
+  res_old <- res_new
+  w_old <- w_new / sum(w_new)
+
+  tnow <-  Sys.time()
+  telapsed <- round(difftime(tnow, tbegin, units = "mins")[[1]], digits = 1)
+  # cat("Gen =", g, ", Distance =", 
+  #       formatC(calc_dist[1], digits = 1, format = "f"), ", ",
+  #       formatC(calc_dist[2], digits = 1, format = "f"), 
+  #       ", Time =", format(tnow, "%H:%M:%S"), ", Minutes elapsed =", 
+  #       telapsed, "\n")
+    
+  write.csv(res_new, paste0("outputs/g", g, "_", tstamp, ".csv"), row.names = F)
+}
+close(simlog)
+write.csv(res_new, paste0("outputs/samples_", tstamp, ".csv"), row.names = F)
+write.csv(params_est[["savepar"]], paste0("outputs/params_", tstamp, ".csv"),
+          row.names = F)
+write.csv(DAT, paste0("outputs/DAT_", tstamp, ".csv"), row.names = FALSE)
+saveRDS(seir_2grp_tauleap, paste0("outputs/seir_2grp_tauleap_", tstamp, ".rds"))
+```
+
+### Run the model over the estimated paramters to generate Figures 3(a) - (e)
+```{r eval = FALSE}
+source("R/sim_over_params.R")
+tstamp <- "0728Txxxxxx"
+res <- sim_over_params(tstamp = tstamp, seed = 1)
+
+sim <- res$sim
+sim_daily <- res$sim_daily
+
+# saveRDS(sim, paste0("outputs/sim_", tstamp, ".rds"))
+# saveRDS(sim_daily, paste0("outputs/sim_daily_", tstamp, ".rds"))
+```
+
+### Figures 3(a), 3(b): Daily incidence (model vs. data)
+```{r}
+tstamp <- "0728Txxxxxx"
+# simulation outputs were created by running the above script
+sim_daily <- readRDS(paste0("outputs/sim_daily_", tstamp, ".rds"))
+
+source("R/load_data.R") # this loads the imputed data 
+DAT$date <- as.Date(DAT$date, format = "%m/%d/%Y")  
+
+d_low <- dplyr::filter(sim_daily, pop == "Low risk")
+d_high <- dplyr::filter(sim_daily, pop == "High risk")
+
+mycolor <- "steelblue"
+xx <- as.Date("2020-02-07")
+yy <- 500
+plt <- ggplot(d_low) +
+  geom_ribbon(aes(x = date, ymin = q025, ymax = q975), fill = mycolor, alpha = 0.2) +
+  geom_ribbon(aes(x = date, ymin = q250, ymax = q750), fill = mycolor, alpha = 0.4) +
+  geom_line(aes(date, q500), color = mycolor, size = 1.2) +
+  geom_point(data = DAT, aes(date, daily_low), inherit.aes = FALSE) +
+  geom_line(data = DAT, aes(date, daily_low), inherit.aes = FALSE) +
+  labs(title = "Non-Shincheonji", x = "Date", y = "Daily confirmed case") +
+  scale_x_date() +
+  annotate("segment", x = xx, xend = xx + 2, 
+           y = 500, yend = 500, size = 1) +
+  annotate("point", x = xx + 1, y = 500, size = 1.4) +
+  annotate("text", x = xx + 3, y = 500, size = 4, label = "Data",
+           hjust = 0, vjust = 0.5)+
+  annotate("segment", x = xx, xend = xx + 2, 
+           y = 475, yend = 475, size = 1, color = mycolor) +
+  annotate("rect", xmin = xx, xmax = xx + 2, 
+           ymin = 465, ymax = 485, alpha = 0.2, fill = mycolor) + 
+  annotate("rect", xmin = xx, xmax = xx + 2, 
+           ymin = 470, ymax = 480, alpha = 0.4, fill = mycolor) + 
+  annotate( "text", x = xx + 3, y = 475, size = 4, 
+            label = "Model", hjust = 0, vjust = 0.5)
+
+# ggsave(paste0("plots/low_risk_daily_", tstamp, ".png"),
+#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+
+mycolor <- "darkred"
+xx <- as.Date("2020-02-07")
+yy <- 560
+plt <- ggplot(d_high) +
+  geom_ribbon(aes(x = date, ymin = q025, ymax = q975), fill = mycolor, alpha = 0.2) +
+  geom_ribbon(aes(x = date, ymin = q250, ymax = q750), fill = mycolor, alpha = 0.4) +
+  geom_line(aes(date, q500), color = "darkred", size = 1.2) +
+  geom_point(data = DAT, aes(date, daily_shincheonji), inherit.aes = FALSE) +
+  geom_line(data = DAT, aes(date, daily_shincheonji), inherit.aes = FALSE) +
+  labs(title = "Shincheonji", x = "Date", y = "Daily confirmed case") +
+  scale_x_date() +
+  annotate("segment", x = xx, xend = xx + 2, 
+           y = yy, yend = yy, size = 1) +
+  annotate("point", x = xx + 1, y = yy, size = 1.4) +
+  annotate("text", x = xx + 3, y = yy, size = 4, 
+           label = "Data", hjust = 0, vjust = 0.5)+
+  annotate("segment", x = xx, xend = xx + 2, 
+           y = yy - 25, yend = yy - 25, size=1, color = mycolor) +
+  annotate("rect", xmin = xx, xmax = xx + 2, 
+           ymin = yy - 35, ymax = yy - 15, alpha = 0.2, fill = mycolor) + 
+  annotate("rect", xmin = xx, xmax = xx + 2, 
+           ymin = yy - 30, ymax = yy - 20, alpha = 0.4, fill = mycolor) + 
+  annotate("text", x = xx + 3, y = yy - 25, size = 4, 
+           label = "Model", hjust = 0, vjust = 0.5)
+
+# ggsave(paste0("plots/high_risk_daily_", tstamp, ".png"), plt,
+#        width = 3.4*2, height = 2.7*2, units = "in")
+```
+
+### Figures 3(c) and 3(d): Cumulative incidence (model vs. data)
+```{r}
+tstamp <- "0728Txxxxxx"
+sim <- readRDS(paste0("outputs/sim_", tstamp, ".rds"))
+
+source("R/load_data.R")  
+DAT$date <- as.Date(DAT$date, format = "%m/%d/%Y")  
+
+total <- dplyr::filter(sim, pop == "Total")
+high <- dplyr::filter(sim, pop == "High risk")
+low <- dplyr::filter(sim, pop == "Low risk")
+
+xd <- as.Date("2020-02-07")
+yy <- 7000 
+
+mylabel_data <- "Data"
+mylabel_model <- "Model"
+sim_res <- high
+mycolor <- "darkred"
+
+plt <- ggplot(DAT) +
+  geom_bar(aes(date, cumul_shincheonji), stat = "identity", fill = "grey50") +
+  geom_ribbon(data = sim_res, aes(x = date, ymin = q250, ymax = q750), 
+               fill = mycolor, alpha = 0.4, inherit.aes = F) +
+  geom_line(data = sim_res, aes(date, q500), color = mycolor, 
+             size = 1.2, inherit.aes = F) +
+  scale_x_date() +
+  geom_ribbon(data = sim_res, aes(x = date, ymin = q025, ymax = q975), 
+               fill = mycolor, alpha = 0.2, inherit.aes = F) +
+  labs(title = "Shincheonji", x = "Date", y = "Cumulative confirmed cases") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(axis.title.y = element_text(size = 11)) +
+  annotate("rect", xmin = xd, xmax = xd + 2, ymin = yy - 300,
+           ymax = yy - 100, alpha = 0.2, fill = mycolor) +
+  annotate("segment", x = xd, xend = xd + 2, y = yy - 200,
+           yend = yy - 200, size = 1, color = mycolor) +
+  annotate("text", x = xd + 3, y = yy - 200, size = 4, 
+           label = mylabel_model, hjust=0, vjust = 0.5) + 
+  annotate("rect", xmin = xd, xmax = xd + 2, ymin = yy - 600, 
+           ymax = yy - 400, fill = "grey50", color = "black") +
+  annotate("text", x = xd + 3, y = yy - 500, size = 4, 
+           label = mylabel_data, hjust = 0, vjust = 0.5) 
+# 
+# ggsave(paste0("plots/high_cumul_data_model_", tstamp, ".png"),
+#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+
+mylabel_data <- "Data"
+mylabel_model <- "Model"
+sim_res <- low
+mycolor <- "steelblue"
+
+plt <- ggplot(DAT) +
+  geom_bar(aes(date, cumul_low), stat = "identity", fill = "grey50") +
+  geom_ribbon(data = sim_res, aes(x = date, ymin = q250, ymax = q750), 
+               fill = mycolor, alpha = 0.4, inherit.aes = F) +
+  geom_line(data = sim_res, aes(date, q500), color = mycolor, 
+             size = 1.2, inherit.aes = F) +
+  scale_x_date() +
+  geom_ribbon(data = sim_res, aes(x = date, ymin = q025, ymax = q975), 
+               fill = mycolor, alpha = 0.2, inherit.aes = F) +
+  labs(title = "Non-Shincheonji", x = "Date", y = "Cumulative confirmed cases") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1)) +
+  theme(axis.title.y = element_text(size = 11)) +
+  annotate("rect", xmin = xd, xmax = xd + 2, ymin = yy - 300,
+           ymax = yy - 100, alpha = 0.2, fill = mycolor) +
+  annotate("segment", x = xd, xend = xd + 2, y = yy - 200,
+           yend = yy - 200, size = 1, color = mycolor) +
+  annotate("text", x = xd + 3, y = yy - 200, size = 4, 
+           label = mylabel_model, hjust=0, vjust = 0.5) + 
+  annotate("rect", xmin = xd, xmax = xd + 2, ymin = yy - 600, 
+           ymax = yy - 400, fill = "grey50", color = "black") +
+  annotate("text", x = xd + 3, y = yy - 500, size = 4, 
+           label = mylabel_data, hjust = 0, vjust = 0.5) 
+# 
+# ggsave(paste0("plots/low_cumul_data_model_", tstamp, ".png"),
+#        plt, width = 3.4*2, height = 2.7*2, units = "in")
+```
+
+
+### Figure 3(e): Posterior distribution
+```{r}
+# combine results from different random seeds
+tstamp <- "0728Txxxxxx"
+pat <- "^samples_072[7-8].*seed.csv$" 
+# 10 files with each having 200 particles and different random seed 
+fls <- list.files("outputs/", pattern = pat, full.names = T) 
+# > fls
+#  [1] "outputs/samples_0727T233730_fa0306_rel05_mr05_seed.csv"
+#  [2] "outputs/samples_0728T024820_seed.csv"                  
+#  [3] "outputs/samples_0728T025132_seed.csv"                  
+#  [4] "outputs/samples_0728T025245_seed.csv"                  
+#  [5] "outputs/samples_0728T025352_seed.csv"                  
+#  [6] "outputs/samples_0728T025503_seed.csv"                  
+#  [7] "outputs/samples_0728T025527_seed.csv"                  
+#  [8] "outputs/samples_0728T025626_seed.csv"                  
+#  [9] "outputs/samples_0728T025739_seed.csv"                  
+# [10] "outputs/samples_0728T025748_seed.csv"    
+nms <- c("R01", "I0", "c12", "Rf", "dur_int", "R02")
+nsample <- 200
+df <- data.frame(matrix(NA, nrow = nsample * length(fls), ncol = length(nms))) 
+names(df) <- nms
+
+## save samples for running simulations using estimated parameters
+# data.table::fwrite(df, "outputs/samples_0728Txxxxxx.csv")
+
+for (i in 1:length(fls)) {
+  cat("i =", i, ",", fls[i], "\n")
+  res <- read.csv(fls[i])
+  df[(200*(i-1)+1):(200*i), 1:6] <- res[1:200, 1:6] 
+}
+pr <- c(0.025, 0.25, 0.5, 0.75, 0.975)
+pq <- apply(df, 2, quantile, probs = pr)
+# pq
+
+d <- cbind(data.frame(
+  id = (6-c(1, 4, 6, 3, 5, 2))),
+  as.data.frame(t(pq)))
+
+plt <- ggplot(d) +
+  geom_segment(aes(y = `2.5%`, yend = `97.5%`, x = id, xend = id), size = 1) +
+  geom_segment(aes(y = `25%`, yend = `75%`, x = id, xend = id), size = 1.6) +
+  geom_point(aes(id, `50%`), size = 2.2, color = "red") +
+  scale_x_continuous(
+    name = "", 
+    labels = c(expression(italic(c)[12]),
+              expression(italic(d)), 
+              expression(italic(I)[0]), 
+              expression(italic(R)^final), 
+              expression(italic(R)[paste(0, ",", 2)]), 
+              expression(italic(R)[paste(0, ",", 1)]))) + 
+  scale_y_continuous(name = "Value") +
+  coord_flip() 
+  
+# ggsave(paste0("plots/params_", tstamp, ".png"), plt,
+#       width = 3.4, height = 2.7, units = "in")
+```
+
+
+## Supplementary Material
+
+### Imputing missing data
+```{r}
+library(imputeTS)
+library(zoo)
+
+d <- read_xlsx("data/covid_daegu.xlsx", "incidence")
+DAT <- d[, 1:5]
+DAT$date <- as.Date(d$date)
+nr <- nrow(DAT)
+names(DAT) <- c("date", "daily_total", "daily_shincheonji",
+                "total", "shincheonji")
+DAT$low <- DAT$total - DAT$shincheonji
+# calculate daily incidence 
+DAT$daily_total[2:nr] <- DAT$total[2:nr] - DAT$total[1:(nr-1)]
+DAT$daily_shincheonji[2:nr] <- DAT$shincheonji[2:nr] - DAT$shincheonji[1:(nr-1)]
+DAT$daily_low <- DAT$daily_total - DAT$daily_shincheonji
+
+# For some dates, daily_low is negative, i.e., daily_sincheonji is larger than the # daily_total. This indicates errors in the dataset
+# We assume that exchange daily_total and daily_shincheonji when
+# daily_shincheonji > daily total
+# Then, revert the sign of the daily_low 
+id <- which(DAT$daily_low < 0)
+DAT[id, c("daily_shincheonji", "daily_low")] <- NA
+d <- DAT
+DAT[id, "daily_total"] <- d[id, "daily_shincheonji"]
+DAT[id, "daily_shincheonji"] <- d[id, "daily_total"]
+DAT[id, "daily_low"] <-  - d[id, "daily_low"]
+
+# write_csv(DAT, "outputs/DAT_Temp.csv")
+# DAT <- read_csv( "outputs/DAT_Temp.csv" ) 
+# Now impute missing data for the shincheonji
+shincheonji_imputed <- na_kalman(DAT$shincheonji)
+# shincheonji_imputed <- na_interpolation (DAT$shincheonji)
+# shincheonji_imputed <- na.spline(DAT$shincheonji)
+
+shin <- shincheonji_imputed
+d <- data.frame(tot = DAT$total, shin = shin, low = DAT$total - shin)
+
+# calculate daily incidence based on the imputed shincheonji
+nr <- nrow(d)
+daily_tot <- d$tot[2:nr] - d$tot[1:(nr-1)]
+daily_low <- d$low[2:nr] - d$low[1:(nr-1)]
+daily_shin <- d$shin[2:nr] - d$shin[1:(nr-1)]
+
+dd <- cbind(d,
+            data.frame(
+              daily_tot = c(d$tot[1],  daily_tot),
+              daily_shin = c(d$shin[1], daily_shin),
+              daily_low = c(d$low[1], daily_low)))
+
+# We exchange daily_total and daily_shincheonji when 
+# daily_shincheonji > daily total
+dd %<>%
+  mutate(daily_tot_new = ifelse(daily_low < 0, daily_shin, daily_tot),
+         daily_shin_new = ifelse(daily_low < 0, daily_tot, daily_shin), 
+         daily_low_new = ifelse(daily_low < 0, 
+                                daily_shin - daily_tot, daily_low))
+
+
+# We exchange daily_tot_new and daily_low_new when 
+# daily_shin_new < 0. Then, we set daily_shin_new = daily_tot_new - 
+# daily_low_new
+
+dd %<>%
+  mutate(daily_tot_new = ifelse(daily_shin_new < 0,
+                                daily_low_new, daily_tot_new),
+         daily_shin_new = ifelse(daily_shin_new < 0,
+                                 daily_low_new - daily_tot_new, daily_shin_new),
+         daily_low_new = ifelse(daily_shin_new < 0,
+                                daily_tot_new, daily_low_new))
+library(lubridate)
+dates <- 
+  data.frame(date = seq(ymd("2020-02-18"), by = "day", length.out = nrow(dd)))
+ddd <- cbind(dates, dd)
+names(ddd) <- c("date", "cumul_total", "cumul_shincheonji", "cumul_low",
+                 "d_tot", "d_shin", "d_low", "daily_total",
+                 "daily_shincheonji", "daily_low")
+ddd$cumul_total <- cumsum(ddd$daily_total)
+ddd$cumul_shincheonji <- cumsum(ddd$daily_shincheonji)
+ddd$cumul_low <- cumsum(ddd$daily_low)
+
+# write_csv(ddd, "outputs/DAT_Imputed.csv")
+```
+
+### Figure S1: missing data imputation
+```{r}
+d1 <- read_xlsx("data/covid_daegu.xlsx", "incidence")
+d <- d1[, 1:5]
+d$date <- as.Date(d$date)
+# Uncomment if you want to plot the imputed version
+# d1 <- read_csv("outputs/DAT_Imputed.csv")
+# d <- d1[, c("date", "daily_total", "daily_shincheonji", 
+#             "cumul_total", "cumul_shincheonji")]
+# d$date <- as.Date(d$date, format="%m/%d/%Y")
+
+names(d) <- c("date", "daily_total", "daily_shincheonji", "Total", "Shincheonji")
+
+plt <- ggplot(d) +
+  geom_bar(aes(date, Total), stat="identity", fill=NA, color="black") +
+  geom_bar(aes(date, Shincheonji), stat="identity", fill="grey50") +
+  scale_y_continuous( limits=c(0,8000) ) +
+  labs( y="Cumulative number of cases", x="Date" ) +
+  annotate( "rect", xmin=max(d$date)-9, xmax=max(d$date)-8, ymin=7900, ymax=8000, fill=NA, color="black" ) +
+  annotate( "rect", xmin=max(d$date)-9, xmax=max(d$date)-8, ymin=7500, ymax=7600, fill="grey50", color="grey50" ) + 
+  annotate( "text", x = max(d$date)-6, y=c(7950,7550), 
+            label=c("Total", "Shincheonji"), hjust=0, size=3 ) +
+  theme(axis.text.x = element_text(angle = 45, hjust=1), panel.grid.major=element_line("grey90") ) +
+  scale_x_date( date_labels = "%b %d", 
+                labels=seq( ymd("2020-02-15"), ymd("2020-03-31"), length.out=10), 
+                breaks=seq( ymd("2020-02-15"), ymd("2020-03-31"), length.out=10) )
+plt  
+
+# ggsave("plots/before_impute.png", p, width=3.4, height=2.7, units="in")
+# ggsave("plots/after_impute.png", p, width=3.4, height=2.7, units="in")
+```
+
+
+### Figure S2: posterior distribution
+```{r}
+# combine results from different random seeds
+tstamp <- "0728Txxxxxx"
+pat <- "^samples_072[7-8].*seed.csv$" 
+# 10 files with each having 200 particles and different random seed 
+fls <- list.files("outputs/", pattern = pat, full.names = T) 
+# > fls
+#  [1] "outputs/samples_0727T233730_fa0306_rel05_mr05_seed.csv"
+#  [2] "outputs/samples_0728T024820_seed.csv"                  
+#  [3] "outputs/samples_0728T025132_seed.csv"                  
+#  [4] "outputs/samples_0728T025245_seed.csv"                  
+#  [5] "outputs/samples_0728T025352_seed.csv"                  
+#  [6] "outputs/samples_0728T025503_seed.csv"                  
+#  [7] "outputs/samples_0728T025527_seed.csv"                  
+#  [8] "outputs/samples_0728T025626_seed.csv"                  
+#  [9] "outputs/samples_0728T025739_seed.csv"                  
+# [10] "outputs/samples_0728T025748_seed.csv"    
+nms <- c("R01", "I0", "c12", "Rf", "dur_int", "R02")
+nsample <- 200
+df <- data.frame(matrix(NA, nrow = nsample * length(fls), ncol = length(nms))) 
+names(df) <- nms
+
+for (i in 1:length(fls)) {
+  cat("i =", i, ",", fls[i], "\n")
+  res <- read.csv(fls[i])
+  df[(200*(i-1)+1):(200*i), 1:6] <- res[1:200, 1:6] 
+}
+
+library("bayesplot")
+color_scheme_set("red")
+plt <- mcmc_pairs(df, pars = nms,
+            labels = c(expression(italic(R)[paste(0, ",", 1)]),
+                       expression(italic(I)[0]), 
+                       expression(italic(c)[12]), 
+                       expression(italic(R)^final),
+                       expression(italic(d)), 
+                       expression(italic(R)[paste(0, ",", 2)]),  
+            off_diag_args = list(size = 2, alpha = 1/3)))
+plt
+
+# ggsave(paste0("plots/pairs_", tstamp, ".png"), plt,
+#        width = 3.4*4, height = 2.7*4, units = "in")
+```
+
+
+### Table S2: Doubling time, epidemic growth rate, and $R_0$ for the SEIR model
+
+$$T_d = \frac{\ln(2)}{r}$$
+
+$$r = \frac{1}{2}\left(-(\sigma + \gamma) + \sqrt((\sigma-\gamma)^2 + 4\beta\sigma)\right)$$
+
+$$\mathcal{R}_0 = \frac{\beta}{\gamma}$$
+
+```{r}
+d <- read_csv("outputs/doubling_time.csv")
+d %<>% filter(date >= as.Date("2020-02-19"), date <= as.Date("2020-03-05")) 
+
+d %>% filter(var == "Shincheonji", days == 1) %>% select("doubling") -> d1
+d %>% filter(var == "Non-Shincheonji", days == 1) %>% select("doubling") -> d2
+d %>% filter(var == "Total", days == 1) %>% select("doubling") -> d3
+d %>% filter(var == "Shincheonji", days == 7) %>% select("doubling") -> d4
+d %>% filter(var == "Non-Shincheonji", days == 7) %>% select("doubling") -> d5
+d %>% filter(var == "Total", days == 7) %>% select("doubling") -> d6
+
+d <- data.frame(d1, d2, d3, d4, d5, d6)
+
+epsilon <- 1/3
+gamma <- 1/6.5
+R0 <- 10
+beta <- R0*gamma
+
+beta_from_growth_seir <- function(r, epsilon = 1/3, gamma = 1/6.5) {
+  beta <- (1/4)*((2 * r + (epsilon + gamma))^2 - (epsilon - gamma)^2) / epsilon
+}
+
+R <- data.frame(matrix(NA, nrow = nrow(d), ncol = (ncol(d) - 1)))
+
+for (i in 1:nrow(d)) {
+  for (r in 1:ncol(d)){
+    if (!is.na(d[i, r]) & d[i, r] > 0){
+      R[i, r] <- beta_from_growth_seir(r = log(2) / d[i, r]) / gamma
+    }
+  }
+}
+round(R, digits = 1)
+# fwrite(R, "outputs/R0_from_doubling_time.csv")  
+```
+
+### Figure S3: sensitivity analysis
+```{r}
+# 1) Fraction of asymptomatic infection f
+pat <- "^samples_0727T23.*fa.*csv$" # fit with reulermultinomial 
+fls <- list.files("outputs/", pattern = pat, full.names = T)
+or <- c(2, 1, 3, 4) # reorder the files based on mr values
+fls <- fls[or]
+# > fls
+# [1] "outputs/samples_0727T233832_fa01.csv"                  
+# [2] "outputs/samples_0727T233730_fa0306_rel05_mr05_seed.csv"
+# [3] "outputs/samples_0727T233938_fa05.csv"                  
+# [4] "outputs/samples_0727T234101_fa07.csv" 
+
+
+# 2) Relative rate ρ of isolation of asymptomatic patients compared to the 
+# symptomatic patients before the intervention.
+pat <- "^samples_0727T.*rel.*csv$" # fit with reulermultinomial 
+fls <- list.files("outputs/", pattern = pat, full.names = T)
+or <- c(2, 3, 1, 4, 5) # reorder the files based on mr values
+fls <- fls[or]
+# > fls
+# [1] "outputs/samples_0727T234214_rel01.csv"                 
+# [2] "outputs/samples_0727T234319_rel03.csv"                 
+# [3] "outputs/samples_0727T233730_fa0306_rel05_mr05_seed.csv"
+# [4] "outputs/samples_0727T234429_rel07.csv"                 
+# [5] "outputs/samples_0727T234536_rel09.csv"    
+
+# 3) Time from symptom onset to isolation during the peak of the intervention:
+# 1⁄α^final = 1, 2, 3 days 
+pat <- "^samples_0727T23.*mr.*csv$" # fit with reulermultinomial 
+fls <- list.files("outputs/", pattern = pat, full.names = T)
+or <- c(3, 1, 2) # reorder the files based on 1/mr values
+fls <- fls[or]
+# > fls
+# [1] "outputs/samples_0727T233730_fa0306_rel05_mr05_seed.csv"
+# [2] "outputs/samples_0727T234749_mr033.csv"                 
+# [3] "outputs/samples_0727T234910_mr1.csv" 
+
+pr <- c(0.025, 0.25, 0.5, 0.75, 0.975)
+dur <- c12 <- I0 <- Rf <- R2 <- R1 <- 
+  data.frame(matrix(NA, nrow = 5, ncol = length(fls)))
+
+for (i in 1:length(fls)) {
+  cat("i =", i, "\n")
+  res <- read.csv(fls[i])
+  q <- apply(res, 2, quantile, probs = pr)
+  R1[, i] <- q[, 1]
+  I0[, i] <- q[, 2]
+  c12[, i] <- q[, 3]
+  Rf[, i] <- q[, 4]
+  dur[, i] <- q[, 5]
+  R2[, i] <- q[, 6]
+}
+
+par_names <- c("R01", "I0", "c12", "R_final", "dur_int", "R02") 
+xlab <- expression(1/alpha^final)
+# xlab <- expression(rho)
+# xlab <- expression(italic(f))
+
+sim_list <- list()
+sim_list[[1]] <- R1
+sim_list[[2]] <- R2
+sim_list[[3]] <- I0
+sim_list[[4]] <- c12
+sim_list[[5]] <- dur
+sim_list[[6]] <- Rf
+  
+ylab_list <- list()
+ylab_list[[1]] <- expression(italic(R)[paste(0, ",", 1)])
+ylab_list[[2]] <- expression(italic(R)[paste(0, ",", 2)])
+ylab_list[[3]] <- expression(italic(I)[0])
+ylab_list[[4]] <- expression(italic(c)[12])
+ylab_list[[5]] <- expression(italic(d))
+ylab_list[[6]] <- expression(italic(R)^final)
+
+fn <- c("R1", "R2", "I0", "c12", "d", "Rf")
+
+for (i in 1:6) {
+  sim <- sim_list[[i]]
+  ylab <- ylab_list[[i]]
+  fname <- fn[i]
+  dd <- as.data.frame(t(sim))
+  d <- cbind(data.frame(par = c(1, 2, 3), dd))
+
+  plt <- ggplot(d) +
+    geom_segment(aes(y = V1, yend = V5, x = par, xend = par), size = 1) +
+    geom_segment(aes(y = V2, yend = V4, x = par, xend = par), size = 1.6) +
+    geom_point(aes(par , V3), size = 2.2, color = "red") +
+    labs(y = ylab, x = xlab)
+  
+  plt
+  # tstamp <- "0727T23"
+  # ggsave(paste0("plots/", fname, "_alpha_", tstamp, ".png"), plt,
+  #        width = 3.4, height = 2.7, units = "in")
+}
+```
